@@ -1,0 +1,37 @@
+name: security
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  secrets-and-deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      OSV_VERSION: "2.7.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Gitleaks and OSV-Scanner (checksums and Go module sums verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"; mkdir -p bin
+          gl="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${gl}"
+          curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " ${gl}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum -c -
+          tar -xzf "$gl" -C bin gitleaks
+          GOBIN="$RUNNER_TEMP/bin" GOTOOLCHAIN=auto go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Gitleaks (fails on any secret)
+        run: gitleaks git --redact --no-banner .
+      - name: OSV-Scanner (fails on known-vulnerable dependencies)
+        run: |
+          set +e; osv-scanner scan source -r .; code=$?; set -e
+          if [ "$code" = "128" ]; then echo "No lockfiles yet"; exit 0; fi
+          exit "$code"
