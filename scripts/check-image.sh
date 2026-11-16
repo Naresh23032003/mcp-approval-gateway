@@ -8,7 +8,7 @@ fi
 
 IMAGE="$1"
 
-found="$(docker run --rm --entrypoint sh "$IMAGE" -c 'find / -xdev \( -name .git -o -name "*.map" \) -not -path "/proc/*" 2>/dev/null')"
+found="$(docker run --rm --entrypoint sh "$IMAGE" -c 'find / -xdev \( -name .git -o -name "*.map" \) -not -path "/proc/*" 2>/dev/null || true')"
 if [ -n "$found" ]; then
   echo "Disallowed .git or .map files found in image:" >&2
   echo "$found" >&2
