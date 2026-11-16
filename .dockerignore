@@ -1,0 +1,17 @@
+.git
+.github
+node_modules
+dist
+coverage
+test
+docs
+scripts
+*.map
+.env*
+*.md
+*.db
+*.db-*
+gateway.toml
+gateway.example.toml
+eslint.config.js
+vitest.config.ts
