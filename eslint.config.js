@@ -1,6 +1,17 @@
 import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 
+const childProcessRestrictedPaths = [
+  {
+    name: "child_process",
+    message: "The gateway never runs OS commands"
+  },
+  {
+    name: "node:child_process",
+    message: "The gateway never runs OS commands"
+  }
+];
+
 export const securityRules = {
   "no-eval": "error",
   "no-new-func": "error",
@@ -8,16 +19,7 @@ export const securityRules = {
   "no-restricted-imports": [
     "error",
     {
-      paths: [
-        {
-          name: "child_process",
-          message: "The gateway never runs OS commands"
-        },
-        {
-          name: "node:child_process",
-          message: "The gateway never runs OS commands"
-        }
-      ]
+      paths: childProcessRestrictedPaths
     }
   ],
   "no-restricted-syntax": [
@@ -33,7 +35,7 @@ export const securityRules = {
       message: "MD5 and SHA-1 are disallowed (ASVS V11.4.1)."
     }
   ]
-  // Where mcpgw-003 and mcpgw-005 add rules: add database and HTML/OAuth lint rules here.
+  // Where mcpgw-005 adds rules: add database and HTML/OAuth lint rules here.
 };
 
 export default tseslint.config(
@@ -52,6 +54,40 @@ export default tseslint.config(
     rules: {
       ...securityRules,
       "@typescript-eslint/no-implied-eval": "error"
+    }
+  },
+  {
+    files: ["src/public/**/*.ts", "src/oauth/**/*.ts", "src/mcp/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: childProcessRestrictedPaths,
+          patterns: [
+            {
+              regex: "(^|/)approve(/|$)",
+              message: "Public, OAuth and MCP modules must not import from src/approve."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    files: ["src/approve/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: childProcessRestrictedPaths,
+          patterns: [
+            {
+              regex: "(^|/)public(/|$)",
+              message: "Approve modules must not import from src/public."
+            }
+          ]
+        }
+      ]
     }
   }
 );

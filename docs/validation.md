@@ -31,3 +31,15 @@ All tables use strict schema validation. Unknown keys are rejected with a line n
 | Common password list | Neither the exact string nor its lower-cased form appears in the bundled 10,000 common password list | `That passphrase is on a list of commonly used passwords. Choose another.` |
 | Confirmation match | Second entry matches the first entry character for character | `The two entries differ. Nothing was written. Run the command again.` |
 | Current passphrase on change | When `GATEWAY_CONFIG` exists and has a non-empty `owner_passphrase_hash`, the current passphrase must verify against that hash | `The current passphrase did not match. Nothing was written.` |
+
+## HTTP request validation
+
+These rules apply at the HTTP boundary (OWASP ASVS 5.0 V3.2.1, V3.4.1, V3.4.2, V3.5.3, V4.1.1, V5.2.1).
+
+| Rule | Scope | Requirement | Failure response |
+| --- | --- | --- | --- |
+| Request `Content-Type` | Both listeners, `POST`, `PUT`, `PATCH`, `DELETE` requests carrying a body (`Content-Length` > 0 or `Transfer-Encoding`) | Media type must be `application/json` or `application/x-www-form-urlencoded` (parameters such as `charset` are allowed) | `415` `application/json; charset=utf-8` with `{"error":"unsupported_media_type"}` |
+| Body size limit | Public listener JSON and form-urlencoded bodies | At most `64 KB` | `413` `application/json; charset=utf-8` with `{"error":"payload_too_large"}` (no stack trace) |
+| Malformed JSON | Public listener JSON bodies | Valid JSON syntax | `400` `application/json; charset=utf-8` with `{"error":"invalid_request"}` (no parser error text or stack trace) |
+| Method safety | Route table (`src/server/routes.ts`) | State changes happen only on `POST`; every `GET` route has `mutates: false` | Enforced by automated route-table tests |
+| Unknown routes and methods | Both listeners | Unmatched paths or unsupported methods return a plain 404 without revealing route shapes | `404` `text/plain; charset=utf-8` with `Not found.` |

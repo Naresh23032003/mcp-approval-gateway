@@ -10,12 +10,15 @@ import {
   validatePassphrase,
   verifyPassphrase
 } from "./passphrase.js";
+import { startListeners, type ListenersHandle } from "./server/listen.js";
 
 export interface CliIo {
   stdin?: NodeJS.ReadableStream & { isTTY?: boolean; setRawMode?: (mode: boolean) => void };
   stdout?: { write: (chunk: string) => unknown };
   stderr?: { write: (chunk: string) => unknown };
   configPath?: string;
+  signal?: AbortSignal;
+  onListening?: (handle: ListenersHandle) => void;
 }
 
 function readExistingPassphraseHash(configPath: string): string | null {
@@ -98,7 +101,7 @@ async function createPromptReader(
   };
 }
 
-export function runServe(configPath: string, io?: CliIo): number {
+export async function runServe(configPath: string, io?: CliIo): Promise<number> {
   const stdout = io?.stdout ?? process.stdout;
   const stderr = io?.stderr ?? process.stderr;
 
@@ -113,8 +116,60 @@ export function runServe(configPath: string, io?: CliIo): number {
     return 1;
   }
 
-  stdout.write(`gateway | config ok: ${configPath}\n`);
-  return 0;
+  let listeners: ListenersHandle;
+  try {
+    listeners = await startListeners(result.config);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    stderr.write(`gateway | ${message}\n`);
+    return 1;
+  }
+
+  const publicEndpoint = `${listeners.publicAddress.address}:${listeners.publicAddress.port}`;
+  const approveEndpoint = `${listeners.approveAddress.address}:${listeners.approveAddress.port}`;
+  const publicPad = " ".repeat(Math.max(2, 24 - publicEndpoint.length));
+  const approvePad = " ".repeat(Math.max(2, 24 - approveEndpoint.length));
+  stdout.write(`gateway | public listener   ${publicEndpoint}${publicPad}oauth and mcp routes only\n`);
+  stdout.write(
+    `gateway | approve listener  ${approveEndpoint}${approvePad}private, tailnet only through the sidecar\n`
+  );
+
+  return await new Promise<number>((resolve) => {
+    let shuttingDown = false;
+
+    const shutdown = (): void => {
+      if (shuttingDown) {
+        return;
+      }
+      shuttingDown = true;
+      process.removeListener("SIGTERM", onSignal);
+      process.removeListener("SIGINT", onSignal);
+      io?.signal?.removeEventListener("abort", shutdown);
+      listeners
+        .close()
+        .then(() => resolve(0))
+        .catch((closeErr: unknown) => {
+          const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+          stderr.write(`gateway | shutdown error: ${msg}\n`);
+          resolve(1);
+        });
+    };
+
+    const onSignal = (): void => {
+      shutdown();
+    };
+
+    process.on("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
+    if (io?.signal) {
+      if (io.signal.aborted) {
+        shutdown();
+        return;
+      }
+      io.signal.addEventListener("abort", shutdown, { once: true });
+    }
+    io?.onListening?.(listeners);
+  });
 }
 
 export async function runHashPassphrase(configPath: string, io?: CliIo): Promise<number> {
