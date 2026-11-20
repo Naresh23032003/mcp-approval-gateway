@@ -14,5 +14,6 @@
 | Package | Licence | Purpose |
 | --- | --- | --- |
 | `@node-rs/argon2` | MIT | Argon2id hashing and verification for the owner passphrase (ASVS V11.4.1). |
+| `express` | MIT | HTTP server for the public and approve listeners (also a direct dependency of the MCP SDK). |
 | `smol-toml` | MIT | Parsing `gateway.toml` configuration files. |
 | `zod` | MIT | Strict schema validation for `gateway.toml` configuration. |
