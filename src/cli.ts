@@ -16,7 +16,9 @@ import {
   validatePassphrase,
   verifyPassphrase
 } from "./passphrase.js";
+import { createOAuthRouter } from "./oauth/router.js";
 import { startListeners, type ListenersHandle } from "./server/listen.js";
+import { openDb } from "./store/db.js";
 
 export interface CliIo {
   stdin?: NodeJS.ReadableStream & { isTTY?: boolean; setRawMode?: (mode: boolean) => void };
@@ -109,9 +111,12 @@ async function createPromptReader(
   };
 }
 
+export const DEFAULT_DATA_DIR = "/data";
+
 export async function runServe(configPath: string, io?: CliIo): Promise<number> {
   const stdout = io?.stdout ?? process.stdout;
   const stderr = io?.stderr ?? process.stderr;
+  const env = io?.env ?? process.env;
 
   const result = loadConfig(configPath);
   if (!result.ok) {
@@ -124,10 +129,31 @@ export async function runServe(configPath: string, io?: CliIo): Promise<number> 
     return 1;
   }
 
+  const rawDataDir = env.DATA_DIR;
+  const dataDir =
+    rawDataDir !== undefined && rawDataDir.trim().length > 0 ? rawDataDir.trim() : DEFAULT_DATA_DIR;
+
+  let db: ReturnType<typeof openDb>;
+  try {
+    db = openDb(dataDir);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    stderr.write(`gateway | failed to open database in ${dataDir}: ${message}\n`);
+    return 1;
+  }
+
   let listeners: ListenersHandle;
   try {
-    listeners = await startListeners(result.config);
+    const oauthRouter = createOAuthRouter({ config: result.config, db });
+    listeners = await startListeners(result.config, {
+      publicDeps: { oauthRouter }
+    });
   } catch (err: unknown) {
+    try {
+      db.close();
+    } catch {
+      // Ignore close error while handling startup failure.
+    }
     const message = err instanceof Error ? err.message : String(err);
     stderr.write(`gateway | ${message}\n`);
     return 1;
@@ -155,8 +181,16 @@ export async function runServe(configPath: string, io?: CliIo): Promise<number> 
       io?.signal?.removeEventListener("abort", shutdown);
       listeners
         .close()
-        .then(() => resolve(0))
+        .then(() => {
+          db.close();
+          resolve(0);
+        })
         .catch((closeErr: unknown) => {
+          try {
+            db.close();
+          } catch {
+            // Ignore close error during shutdown failure.
+          }
           const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
           stderr.write(`gateway | shutdown error: ${msg}\n`);
           resolve(1);

@@ -43,3 +43,21 @@ These rules apply at the HTTP boundary (OWASP ASVS 5.0 V3.2.1, V3.4.1, V3.4.2, V
 | Malformed JSON | Public listener JSON bodies | Valid JSON syntax | `400` `application/json; charset=utf-8` with `{"error":"invalid_request"}` (no parser error text or stack trace) |
 | Method safety | Route table (`src/server/routes.ts`) | State changes happen only on `POST`; every `GET` route has `mutates: false` | Enforced by automated route-table tests |
 | Unknown routes and methods | Both listeners | Unmatched paths or unsupported methods return a plain 404 without revealing route shapes | `404` `text/plain; charset=utf-8` with `Not found.` |
+
+## Dynamic client registration (`POST /register`)
+
+These allow-list rules are enforced by a Zod schema before any client row is written (OWASP ASVS 5.0 V2.1.1, V2.2.1, V5.2.1, V6.1.1, V10.4.4, V15.3.1). Registration creates a public client record only and grants no scopes or tool access until the owner consents.
+
+| Field or rule | Requirement | Failure response |
+| --- | --- | --- |
+| Request `Content-Type` and size | `application/json` (optional parameters such as `charset`), body at most `64 KB` | `415` `unsupported_media_type`, `413` `payload_too_large`, or `400` `invalid_request` on malformed JSON |
+| Rate limit | At most `10` requests per hour per source | `429` `too_many_requests` |
+| `redirect_uris` | Required array of `1` to `5` strings, each at most `2048` characters. Each must be an absolute URL with no `#` fragment and no embedded credentials (`user:pass@` or `@`). Allowed schemes: `https:`, `http:` only for `localhost`, `127.0.0.1` or `[::1]`, or a custom scheme matching `^[a-z][a-z0-9+.-]*$` that contains at least one `.` or `-` (for example `com.example.app:/callback`). Rejects `javascript:`, `data:`, `file:` and `vbscript:` | `400` `invalid_client_metadata` |
+| `client_name` | Optional string, at most `100` characters; stored as sent (escaped when rendered in HTML); defaults to `Unnamed client` when omitted or empty | `400` `invalid_client_metadata` |
+| `token_endpoint_auth_method` | Optional; if present must equal `"none"`. Public clients only, no client secret is issued | `400` `invalid_client_metadata` |
+| `grant_types` | Optional non-empty array whose entries are a subset of `"authorization_code"` and `"refresh_token"`. Defaults to `["authorization_code", "refresh_token"]` | `400` `invalid_client_metadata` |
+| `response_types` | Optional; if present must equal `["code"]`. Defaults to `["code"]` | `400` `invalid_client_metadata` |
+| Unknown extra fields | Ignored by the allow-list schema, never stored in SQLite and never echoed back | Ignored |
+| `client_id` and audit | Random UUID v4 (122 bits of entropy); successful registration writes one `client_registered` row in `audit_events` | `201` on success |
+| Response fields (V15.3.1) | Returns only `client_id`, `client_id_issued_at`, `client_name`, `redirect_uris`, `token_endpoint_auth_method` (`"none"`), `grant_types` and `response_types` | No `client_secret` or internal fields |
+
