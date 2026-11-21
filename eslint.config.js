@@ -36,12 +36,12 @@ export const securityRules = {
     },
     {
       selector:
-        "CallExpression[callee.property.name=/^(prepare|exec)$/] > TemplateLiteral[expressions.length>0]",
+        "CallExpression[callee.property.name=/^(prepare|exec|pragma|run|get|all)$/] > TemplateLiteral[expressions.length>0]",
       message: "Use parameterised SQL with bound parameters instead of template interpolation (ASVS V1.2.4)."
     },
     {
       selector:
-        "CallExpression[callee.property.name=/^(prepare|exec)$/] > BinaryExpression",
+        "CallExpression[callee.property.name=/^(prepare|exec|pragma|run|get|all)$/] > BinaryExpression",
       message: "Use parameterised SQL with bound parameters instead of string concatenation (ASVS V1.2.4)."
     }
   ]

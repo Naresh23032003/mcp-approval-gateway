@@ -11,7 +11,12 @@ import { DEFAULT_CSP } from "../src/server/headers.js";
 import { LISTEN_HOST } from "../src/server/listen.js";
 import { createPublicApp } from "../src/server/public-app.js";
 import { listAuditEvents } from "../src/store/audit.js";
-import { getClientById } from "../src/store/clients.js";
+import {
+  MAX_CLIENTS,
+  UNUSED_CLIENT_PRUNE_AGE_SECONDS,
+  countClients,
+  getClientById
+} from "../src/store/clients.js";
 import { openDb } from "../src/store/db.js";
 
 const TEST_CONFIG: Pick<Config, "public_base_url" | "tools"> = {
@@ -70,9 +75,24 @@ function expectRegisterHeaders(res: Response): void {
   expect(res.headers.get("access-control-allow-credentials")).toBeNull();
 }
 
-function countClients(db: Database.Database): number {
-  const row = db.prepare("SELECT COUNT(*) AS total FROM clients").get() as { total: number };
-  return row.total;
+interface SeedClientRow {
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly createdAt: number;
+  readonly lastUsedAt: number | null;
+}
+
+function seedClients(db: Database.Database, rows: readonly SeedClientRow[]): void {
+  const stmt = db.prepare(
+    "INSERT INTO clients (client_id, client_name, redirect_uris, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)"
+  );
+  const redirectUrisJson = JSON.stringify(["https://client.example/callback"]);
+  const insertMany = db.transaction((items: readonly SeedClientRow[]) => {
+    for (const item of items) {
+      stmt.run(item.clientId, item.clientName, redirectUrisJson, item.createdAt, item.lastUsedAt);
+    }
+  });
+  insertMany(rows);
 }
 
 afterEach(async () => {
@@ -377,5 +397,106 @@ describe("Dynamic client registration (POST /register)", () => {
 
     expect(countClients(db)).toBe(10);
     expect(listAuditEvents(db)).toHaveLength(10);
+  });
+
+  it("refuses POST /register with 429 temporarily_unavailable when the 1000-client cap is full of recent or used clients", async () => {
+    const { baseUrl, db } = await startDcrServer();
+    const now = Math.floor(Date.now() / 1000);
+    const oldTimestamp = now - UNUSED_CLIENT_PRUNE_AGE_SECONDS - 3600;
+    const recentTimestamp = now - 60;
+
+    const rows: SeedClientRow[] = [];
+    for (let i = 0; i < MAX_CLIENTS; i++) {
+      const isOldUsed = i < MAX_CLIENTS / 2;
+      rows.push({
+        clientId: `seeded-client-${i}`,
+        clientName: `Seeded ${i}`,
+        createdAt: isOldUsed ? oldTimestamp : recentTimestamp,
+        lastUsedAt: isOldUsed ? recentTimestamp : null
+      });
+    }
+    seedClients(db, rows);
+    expect(countClients(db)).toBe(MAX_CLIENTS);
+
+    const res = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://127.0.0.1:8080/callback"],
+        client_name: "Overflow Client"
+      })
+    });
+
+    expect(res.status).toBe(429);
+    expectRegisterHeaders(res);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("temporarily_unavailable");
+    expect(countClients(db)).toBe(MAX_CLIENTS);
+    expect(listAuditEvents(db)).toHaveLength(0);
+  });
+
+  it("prunes unused clients older than 24 hours at the 1000-client cap and registers the new client", async () => {
+    const { baseUrl, db } = await startDcrServer();
+    const now = Math.floor(Date.now() / 1000);
+    const staleTimestamp = now - UNUSED_CLIENT_PRUNE_AGE_SECONDS - 60;
+    const recentTimestamp = now - 60;
+
+    const rows: SeedClientRow[] = [
+      {
+        clientId: "stale-unused-1",
+        clientName: "Stale 1",
+        createdAt: staleTimestamp,
+        lastUsedAt: null
+      },
+      {
+        clientId: "stale-unused-2",
+        clientName: "Stale 2",
+        createdAt: staleTimestamp,
+        lastUsedAt: null
+      },
+      {
+        clientId: "old-used-1",
+        clientName: "Old Used",
+        createdAt: staleTimestamp,
+        lastUsedAt: recentTimestamp
+      }
+    ];
+    for (let i = rows.length; i < MAX_CLIENTS; i++) {
+      rows.push({
+        clientId: `recent-client-${i}`,
+        clientName: `Recent ${i}`,
+        createdAt: recentTimestamp,
+        lastUsedAt: null
+      });
+    }
+    seedClients(db, rows);
+    expect(countClients(db)).toBe(MAX_CLIENTS);
+
+    const res = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://127.0.0.1:8080/callback"],
+        client_name: "Fresh Client"
+      })
+    });
+
+    expect(res.status).toBe(201);
+    expectRegisterHeaders(res);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(ALLOWED_RESPONSE_KEYS);
+    expect(body.client_name).toBe("Fresh Client");
+
+    expect(getClientById(db, "stale-unused-1")).toBeUndefined();
+    expect(getClientById(db, "stale-unused-2")).toBeUndefined();
+    expect(getClientById(db, "old-used-1")).toBeDefined();
+    expect(getClientById(db, String(body.client_id))).toBeDefined();
+    expect(countClients(db)).toBe(MAX_CLIENTS - 1);
+
+    const events = listAuditEvents(db);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.event).toBe("client_registered");
+    expect(events[0]?.client_id).toBe(body.client_id);
   });
 });

@@ -15,7 +15,9 @@
 | --- | --- | --- |
 | `@modelcontextprotocol/sdk` | MIT | Official MCP server and client implementation for the demo upstream and gateway. |
 | `@node-rs/argon2` | MIT | Argon2id hashing and verification for the owner passphrase (ASVS V11.4.1). |
-| `better-sqlite3` | MIT | Synchronous SQLite driver with prebuilt binaries for amd64 and arm64. |
+| `better-sqlite3` | MIT | Embedded store with no separate database service (synchronous SQLite driver with prebuilt binaries for amd64 and arm64). |
 | `express` | MIT | HTTP server for the public and approve listeners (also a direct dependency of the MCP SDK). |
 | `smol-toml` | MIT | Parsing `gateway.toml` configuration files. |
 | `zod` | MIT | Strict schema validation for `gateway.toml` configuration. |
+
+No third-party UUID package is used: dynamic client registration generates each `client_id` as a UUID v4 via Node.js's built-in `crypto.randomUUID()`.

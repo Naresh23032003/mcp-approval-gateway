@@ -96,6 +96,23 @@ export function createOAuthRouter(options: OAuthRouterOptions): Router {
       sendJson(res, 415, { error: "unsupported_media_type" });
       return;
     }
+
+    // The MCP SDK registration handler maps non-ServerError OAuthErrors to 400.
+    // Rewrite temporarily_unavailable (e.g. client store cap reached) to 429.
+    const originalJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      if (
+        res.statusCode === 400 &&
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        (body as { error?: unknown }).error === "temporarily_unavailable"
+      ) {
+        res.status(429);
+      }
+      return originalJson(body);
+    }) as typeof res.json;
+
     next();
   });
 

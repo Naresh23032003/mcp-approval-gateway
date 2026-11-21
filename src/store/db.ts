@@ -56,6 +56,17 @@ export function listMigrationFiles(migrationsDir: string = getMigrationsDir()): 
   return migrations;
 }
 
+const MAX_SQLITE_USER_VERSION = 0x7fffffff;
+
+export function setUserVersion(db: Database.Database, version: number): void {
+  if (!Number.isSafeInteger(version) || version < 0 || version > MAX_SQLITE_USER_VERSION) {
+    throw new RangeError(`Invalid SQLite user_version: ${String(version)}`);
+  }
+  // SQLite PRAGMA user_version does not accept bound parameters; version is validated as a 32-bit integer above.
+  // eslint-disable-next-line no-restricted-syntax
+  db.pragma(`user_version = ${version}`);
+}
+
 export function applyMigrations(
   db: Database.Database,
   migrationsDir: string = getMigrationsDir()
@@ -71,7 +82,7 @@ export function applyMigrations(
     const sql = fs.readFileSync(migration.filePath, "utf8");
     const runOne = db.transaction(() => {
       db.exec(sql);
-      db.pragma(`user_version = ${migration.version}`);
+      setUserVersion(db, migration.version);
     });
     runOne();
     applied += 1;
