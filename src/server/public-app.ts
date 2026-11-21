@@ -13,8 +13,10 @@ import {
 
 export interface PublicAppDeps {
   router?: Router;
+  authorizeRouter?: Router;
   oauthRouter?: Router;
-  config?: Pick<Config, "public_base_url" | "tools">;
+  config?: Pick<Config, "public_base_url" | "tools"> &
+    Partial<Pick<Config, "owner_passphrase_hash">>;
   db?: Database.Database;
 }
 
@@ -28,6 +30,10 @@ export function createPublicApp(deps: PublicAppDeps = {}): Express {
   app.use(requireBodyContentType);
   app.use(express.json({ limit: PUBLIC_BODY_LIMIT }));
   app.use(express.urlencoded({ extended: false, limit: PUBLIC_BODY_LIMIT }));
+
+  if (deps.authorizeRouter !== undefined) {
+    app.use(deps.authorizeRouter);
+  }
 
   if (deps.oauthRouter !== undefined) {
     app.use(deps.oauthRouter);

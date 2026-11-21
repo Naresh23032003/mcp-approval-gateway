@@ -149,17 +149,23 @@ describe("OAuth metadata discovery documents (S1, V10.4.4, V3.4.2)", () => {
   });
 });
 
-describe("Unimplemented /authorize and /token endpoints in mcpgw-005", () => {
-  it("returns OAuth error JSON with no stack trace and no DB side effects on GET /authorize and POST /token", async () => {
+describe("Authorize validation and unimplemented /token endpoint", () => {
+  it("returns invalid HTML page on bare GET /authorize and OAuth error JSON on POST /token with no stack trace and no DB side effects", async () => {
     const { baseUrl, db, provider } = await startPublicTestServer();
 
     const authRes = await fetch(`${baseUrl}/authorize`);
     const authText = await authRes.text();
     expect(authRes.status).toBe(400);
-    expectSecurityHeadersWithoutCredentialedCors(authRes);
+    expect(authRes.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(authRes.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(authRes.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    expect(authRes.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(authRes.headers.get("cache-control")).toBe("no-store");
+    expect(authRes.headers.get("x-powered-by")).toBeNull();
     expect(authRes.headers.get("access-control-allow-origin")).toBeNull();
-    const authJson = JSON.parse(authText) as Record<string, unknown>;
-    expect(typeof authJson.error).toBe("string");
+    expect(authRes.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(authText).toContain("This connection request was not accepted.");
+    expect(authText).toContain("unknown client");
     expect(authText).not.toContain("at ");
 
     const tokenRes = await fetch(`${baseUrl}/token`, {
