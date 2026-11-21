@@ -33,9 +33,18 @@ export const securityRules = {
       selector:
         "CallExpression[callee.property.name='createHash'][arguments.0.value=/^(md5|sha-?1)$/i]",
       message: "MD5 and SHA-1 are disallowed (ASVS V11.4.1)."
+    },
+    {
+      selector:
+        "CallExpression[callee.property.name=/^(prepare|exec)$/] > TemplateLiteral[expressions.length>0]",
+      message: "Use parameterised SQL with bound parameters instead of template interpolation (ASVS V1.2.4)."
+    },
+    {
+      selector:
+        "CallExpression[callee.property.name=/^(prepare|exec)$/] > BinaryExpression",
+      message: "Use parameterised SQL with bound parameters instead of string concatenation (ASVS V1.2.4)."
     }
   ]
-  // Where mcpgw-005 adds rules: add database and HTML/OAuth lint rules here.
 };
 
 export default tseslint.config(

@@ -120,10 +120,13 @@ describe("CLI serve and hash-passphrase commands", () => {
       ].join("\n")
     );
 
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcpgw-cli-data-"));
+    tempDirs.push(dataDir);
     const controller = new AbortController();
     const { io, getStdout, getStderr } = createIo("", configPath);
     const code = await runCli(["serve"], {
       ...io,
+      env: { DATA_DIR: dataDir },
       signal: controller.signal,
       onListening: () => {
         controller.abort();

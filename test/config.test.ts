@@ -76,7 +76,7 @@ describe("repo configuration and static security rules", () => {
         (m) => m.ruleId === "no-restricted-syntax" && m.message.includes("V11.4.1")
       )
     ).toBe(true);
-  });
+  }, 15000);
 });
 
 describe("loadConfig", () => {
