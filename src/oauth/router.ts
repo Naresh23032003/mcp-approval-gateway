@@ -8,6 +8,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { Config } from "../config/schema.js";
 import { sendJson } from "../server/headers.js";
+import { createAuthorizeRouter } from "./authorize.js";
 import { SqliteOAuthProvider } from "./provider.js";
 
 export const RESOURCE_NAME = "mcp-approval-gateway";
@@ -17,9 +18,12 @@ export const TOKEN_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 export const TOKEN_RATE_LIMIT_MAX = 30;
 
 export interface OAuthRouterOptions {
-  readonly config: Pick<Config, "public_base_url" | "tools">;
+  readonly config: Pick<Config, "public_base_url" | "tools"> &
+    Partial<Pick<Config, "owner_passphrase_hash">>;
   readonly db: Database.Database;
   readonly provider?: SqliteOAuthProvider;
+  readonly verifyPassphrase?: (storedHash: string, passphrase: string) => Promise<boolean>;
+  readonly now?: () => number;
 }
 
 export function buildScopesSupported(tools: Config["tools"]): string[] {
@@ -83,6 +87,17 @@ export function createOAuthRouter(options: OAuthRouterOptions): Router {
   router.use(
     "/.well-known/oauth-protected-resource",
     exactPathHandler(metadataHandler(protectedResourceMetadata))
+  );
+
+  // Mount our consent and authorization code handlers before mcpAuthRouter so the SDK's
+  // built-in /authorize handler never runs.
+  router.use(
+    createAuthorizeRouter({
+      config: options.config,
+      db: options.db,
+      verifyPassphrase: options.verifyPassphrase,
+      now: options.now
+    })
   );
 
   // Enforce JSON bodies on dynamic client registration (RFC 7591).

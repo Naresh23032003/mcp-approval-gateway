@@ -61,3 +61,32 @@ These allow-list rules are enforced by a Zod schema before any client row is wri
 | `client_id` and audit | Random UUID v4 (122 bits of entropy); successful registration writes one `client_registered` row in `audit_events` | `201` on success |
 | Response fields (V15.3.1) | Returns only `client_id`, `client_id_issued_at`, `client_name`, `redirect_uris`, `token_endpoint_auth_method` (`"none"`), `grant_types` and `response_types` | No `client_secret` or internal fields |
 
+## Authorization request (`GET /authorize` and `POST /authorize`)
+
+Every authorization request is validated with Zod schemas against the `clients` table and `gateway.toml` before rendering the consent page or checking the owner passphrase (OWASP ASVS 5.0 V2.1.1, V2.3.1, V10.4.1). Hidden form fields are treated as untrusted and every check below is repeated on `POST /authorize`. Failed validation returns an HTML error page with a fixed reason string, never echoes request parameters and never redirects.
+
+| Parameter | Requirement | Failure status and fixed reason |
+| --- | --- | --- |
+| HTTP method | Only `GET` and `POST` are accepted on `/authorize` | `404` `text/plain; charset=utf-8` with `Not found.` |
+| `client_id` | Non-empty string (at most 256 characters) matching a row in `clients` | `400` HTML page with `unknown client` |
+| `redirect_uri` | Non-empty string (at most 2048 characters) equal by exact string comparison (no normalisation) to one of the client's registered `redirect_uris` | `400` HTML page with `redirect address not registered` |
+| `response_type` | Must equal `"code"` | `400` HTML page with `request type not supported` |
+| `code_challenge_method` and `code_challenge` | `code_challenge_method` must equal `"S256"`; `code_challenge` must match `^[A-Za-z0-9_-]{43}$` (43 base64url characters) | `400` HTML page with `PKCE S256 missing` |
+| `resource` | Optional string; when present must exactly equal `<public_base_url>/mcp`; when omitted defaults to `<public_base_url>/mcp` | `400` HTML page with `resource not recognised` |
+| `scope` | Optional string (at most 2048 characters), space-separated. `read` is always granted. Non-default read groups configured in `gateway.toml` (`class = "read"`) are offered as unticked checkboxes only when requested. `write:<tool>` and unknown scopes are ignored and never offered or granted | `400` HTML page with `request not accepted` if malformed (for example repeated parameter or over length limit) |
+| `state` | Optional string (at most 2048 characters), preserved and URL-encoded via `URL.searchParams` on redirect | `400` HTML page with `request not accepted` if malformed |
+
+## Consent form submission (`POST /authorize`)
+
+These rules run on `POST /authorize` before any grant or authorization code is issued (OWASP ASVS 5.0 V3.5.1, V6.1.1, V6.2.8, V6.3.1, V14.2.1).
+
+| Field or check | Requirement | Failure response |
+| --- | --- | --- |
+| `Origin` and `Sec-Fetch-Site` | `Origin` must equal the origin of `public_base_url`; if `Origin` is absent, `Sec-Fetch-Site` must equal `"same-origin"` | `403` HTML page with `request not accepted` (no passphrase verify, no lockout row) |
+| CSRF synchronizer token | Cookie `__Host-consent_csrf` and hidden form field `csrf_token` must both be present, non-empty and match via constant-time comparison (`crypto.timingSafeEqual`) | `403` HTML page with `request not accepted` (no passphrase verify, no lockout row) |
+| `decision` | Must be `"allow"` or `"cancel"`. `"cancel"` redirects to the validated `redirect_uri` with `error=access_denied` (and `state` when present) without creating a grant | `400` HTML page with `request not accepted` |
+| Lockout check (`decision = "allow"`) | Fewer than `5` failed tries from `req.ip` within `600` seconds, and outside any active `900`-second lock from a 5-failure burst | `429` HTML page with `Retry-After` header and no form rendered (no passphrase verify) |
+| `passphrase` (`decision = "allow"`) | Non-empty string in POST body, at most `1024` Unicode code points (`Array.from(pw).length <= 1024`), verified with Argon2id against `owner_passphrase_hash` exactly as typed (no trimming or case changes) | Records `auth_failures` and `auth_failed` audit event; returns `401` consent page with remaining tries, or `429` once the 5th failure locks the source |
+| `granted_scopes` (`decision = "allow"`) | Optional checkbox values; intersected with configured non-default read groups that were requested in `scope`. `read` is always included; tampered `write:*` or unknown scopes are ignored | Ignored; never granted |
+
+
