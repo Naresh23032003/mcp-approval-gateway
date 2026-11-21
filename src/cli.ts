@@ -4,6 +4,12 @@ import { pathToFileURL } from "node:url";
 import { parse } from "smol-toml";
 import { loadConfig } from "./config/load.js";
 import {
+  DEFAULT_DEMO_HOST,
+  DEFAULT_DEMO_PORT,
+  startDemo,
+  type DemoHandle
+} from "./demo/server.js";
+import {
   CURRENT_MISMATCH_MESSAGE,
   MISMATCH_MESSAGE,
   hashPassphrase,
@@ -17,8 +23,10 @@ export interface CliIo {
   stdout?: { write: (chunk: string) => unknown };
   stderr?: { write: (chunk: string) => unknown };
   configPath?: string;
+  env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   onListening?: (handle: ListenersHandle) => void;
+  onDemoListening?: (handle: DemoHandle) => void;
 }
 
 function readExistingPassphraseHash(configPath: string): string | null {
@@ -214,6 +222,84 @@ export async function runHashPassphrase(configPath: string, io?: CliIo): Promise
   return 0;
 }
 
+function parseDemoPort(rawPort: string | undefined): number | null {
+  if (rawPort === undefined || rawPort.trim() === "") {
+    return DEFAULT_DEMO_PORT;
+  }
+  const trimmed = rawPort.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 65535) {
+    return null;
+  }
+  return parsed;
+}
+
+export async function runDemo(io?: CliIo): Promise<number> {
+  const stdout = io?.stdout ?? process.stdout;
+  const stderr = io?.stderr ?? process.stderr;
+  const env = io?.env ?? process.env;
+
+  const rawHost = env.DEMO_HOST;
+  const host =
+    rawHost !== undefined && rawHost.trim().length > 0 ? rawHost.trim() : DEFAULT_DEMO_HOST;
+  const port = parseDemoPort(env.DEMO_PORT);
+  if (port === null) {
+    stderr.write("demo | DEMO_PORT must be an integer between 0 and 65535.\n");
+    return 1;
+  }
+
+  let handle: DemoHandle;
+  try {
+    handle = await startDemo({ host, port });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    stderr.write(`demo | ${message}\n`);
+    return 1;
+  }
+
+  stdout.write(`demo | listening on ${handle.url} (in-memory, no auth, do not publish)\n`);
+
+  return await new Promise<number>((resolve) => {
+    let shuttingDown = false;
+
+    const shutdown = (): void => {
+      if (shuttingDown) {
+        return;
+      }
+      shuttingDown = true;
+      process.removeListener("SIGTERM", onSignal);
+      process.removeListener("SIGINT", onSignal);
+      io?.signal?.removeEventListener("abort", shutdown);
+      handle
+        .close()
+        .then(() => resolve(0))
+        .catch((closeErr: unknown) => {
+          const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+          stderr.write(`demo | shutdown error: ${msg}\n`);
+          resolve(1);
+        });
+    };
+
+    const onSignal = (): void => {
+      shutdown();
+    };
+
+    process.on("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
+    if (io?.signal) {
+      if (io.signal.aborted) {
+        shutdown();
+        return;
+      }
+      io.signal.addEventListener("abort", shutdown, { once: true });
+    }
+    io?.onDemoListening?.(handle);
+  });
+}
+
 export async function runCli(args: string[], io?: CliIo): Promise<number> {
   const stderr = io?.stderr ?? process.stderr;
   const configPath = io?.configPath ?? process.env.GATEWAY_CONFIG ?? "/config/gateway.toml";
@@ -225,8 +311,13 @@ export async function runCli(args: string[], io?: CliIo): Promise<number> {
   if (command === "hash-passphrase") {
     return runHashPassphrase(configPath, io);
   }
+  if (command === "demo") {
+    return runDemo(io);
+  }
 
-  stderr.write(`gateway | unknown command "${command}". Use "serve" or "hash-passphrase".\n`);
+  stderr.write(
+    `gateway | unknown command "${command}". Use "serve", "hash-passphrase" or "demo".\n`
+  );
   return 1;
 }
 
