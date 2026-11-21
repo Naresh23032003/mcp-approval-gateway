@@ -13,6 +13,7 @@
 
 | Package | Licence | Purpose |
 | --- | --- | --- |
+| `@modelcontextprotocol/sdk` | MIT | Official MCP server and client implementation for the demo upstream and gateway. |
 | `@node-rs/argon2` | MIT | Argon2id hashing and verification for the owner passphrase (ASVS V11.4.1). |
 | `express` | MIT | HTTP server for the public and approve listeners (also a direct dependency of the MCP SDK). |
 | `smol-toml` | MIT | Parsing `gateway.toml` configuration files. |
