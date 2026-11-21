@@ -222,10 +222,13 @@ describe("listener split (S6)", () => {
       ].join("\n")
     );
 
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcpgw-split-data-"));
+    tempDirs.push(dataDir);
     let stdout = "";
     let stderr = "";
     const code = await runCli(["serve"], {
       configPath,
+      env: { DATA_DIR: dataDir },
       stdout: {
         write: (chunk: string) => {
           stdout += chunk;
@@ -296,12 +299,15 @@ describe("listener split (S6)", () => {
       ].join("\n")
     );
 
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcpgw-split-data-"));
+    tempDirs.push(dataDir);
     let stdout = "";
     let stderr = "";
     let boundHandle: ListenersHandle | undefined;
 
     const codePromise = runCli(["serve"], {
       configPath,
+      env: { DATA_DIR: dataDir },
       stdout: {
         write: (chunk: string) => {
           stdout += chunk;
