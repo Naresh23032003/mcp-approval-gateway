@@ -5,7 +5,8 @@ import { z } from "zod";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import {
   InvalidClientMetadataError,
-  ServerError
+  ServerError,
+  TemporarilyUnavailableError
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   AuthorizationParams,
@@ -16,7 +17,7 @@ import type {
   OAuthClientInformationFull,
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { getClientById, insertClient } from "../store/clients.js";
+import { ClientCapReachedError, getClientById, insertClient } from "../store/clients.js";
 
 export const DEFAULT_CLIENT_NAME = "Unnamed client";
 export const MAX_CLIENT_NAME_LENGTH = 100;
@@ -188,12 +189,21 @@ export class SqliteClientsStore implements OAuthRegisteredClientsStore {
         : [...DEFAULT_GRANT_TYPES];
     const responseTypes: ["code"] = [...DEFAULT_RESPONSE_TYPES];
 
-    insertClient(this.db, {
-      clientId,
-      clientName,
-      redirectUris: parsed.data.redirect_uris,
-      createdAt: issuedAt
-    });
+    try {
+      insertClient(this.db, {
+        clientId,
+        clientName,
+        redirectUris: parsed.data.redirect_uris,
+        createdAt: issuedAt
+      });
+    } catch (err: unknown) {
+      if (err instanceof ClientCapReachedError) {
+        throw new TemporarilyUnavailableError(
+          "Client registration capacity reached. Try again later."
+        );
+      }
+      throw err;
+    }
 
     return {
       client_id: clientId,

@@ -5,12 +5,20 @@ import type Database from "better-sqlite3";
 import { ESLint } from "eslint";
 import { afterEach, describe, expect, it } from "vitest";
 import { listAuditEvents, recordEvent } from "../src/store/audit.js";
-import { getClientById, insertClient } from "../src/store/clients.js";
+import {
+  ClientCapReachedError,
+  MAX_CLIENTS,
+  UNUSED_CLIENT_PRUNE_AGE_SECONDS,
+  countClients,
+  getClientById,
+  insertClient
+} from "../src/store/clients.js";
 import {
   DB_FILENAME,
   applyMigrations,
   listMigrationFiles,
-  openDb
+  openDb,
+  setUserVersion
 } from "../src/store/db.js";
 
 const openDbs: Database.Database[] = [];
@@ -127,60 +135,235 @@ describe("SQLite store and migrations", () => {
     expect(() => badDecidedByStmt.run(1700000000, "write_denied", "attacker")).toThrow();
   });
 
-  it("fails ESLint on interpolated or concatenated SQL passed to prepare or exec (V1.2.4)", async () => {
+  it("validates user_version as a safe 32-bit integer before setting the pragma", () => {
+    const dir = makeTempDir();
+    const db = openDb(dir);
+    openDbs.push(db);
+
+    const initialVersion = Number(db.pragma("user_version", { simple: true }));
+    for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 0x80000000]) {
+      expect(() => setUserVersion(db, invalid)).toThrow(RangeError);
+    }
+    expect(Number(db.pragma("user_version", { simple: true }))).toBe(initialVersion);
+
+    setUserVersion(db, initialVersion + 1);
+    expect(Number(db.pragma("user_version", { simple: true }))).toBe(initialVersion + 1);
+  });
+
+  it("caps the clients table and prunes unused clients older than 24 hours only when the cap is reached", () => {
+    expect(MAX_CLIENTS).toBe(1000);
+    expect(UNUSED_CLIENT_PRUNE_AGE_SECONDS).toBe(24 * 60 * 60);
+
+    const dir = makeTempDir();
+    const db = openDb(dir);
+    openDbs.push(db);
+
+    const now = 1_700_100_000;
+    const cap = 3;
+
+    // Below the cap, stale unused rows are kept without pruning.
+    insertClient(
+      db,
+      {
+        clientId: "client-boundary",
+        clientName: "Boundary Client",
+        redirectUris: ["https://client.example/cb"],
+        createdAt: now - UNUSED_CLIENT_PRUNE_AGE_SECONDS
+      },
+      { maxClients: cap, now }
+    );
+    insertClient(
+      db,
+      {
+        clientId: "client-old-used",
+        clientName: "Old Used Client",
+        redirectUris: ["https://client.example/cb"],
+        createdAt: now - UNUSED_CLIENT_PRUNE_AGE_SECONDS - 10_000
+      },
+      { maxClients: cap, now }
+    );
+    const markUsedStmt = db.prepare("UPDATE clients SET last_used_at = ? WHERE client_id = ?");
+    const usedAt = now - 3600;
+    markUsedStmt.run(usedAt, "client-old-used");
+
+    insertClient(
+      db,
+      {
+        clientId: "client-recent",
+        clientName: "Recent Client",
+        redirectUris: ["https://client.example/cb"],
+        createdAt: now - 60
+      },
+      { maxClients: cap, now }
+    );
+
+    expect(countClients(db)).toBe(3);
+    expect(listAuditEvents(db)).toHaveLength(3);
+
+    // At the cap with no client strictly older than 24h and unused, insert is refused.
+    expect(() =>
+      insertClient(
+        db,
+        {
+          clientId: "client-refused",
+          clientName: "Refused Client",
+          redirectUris: ["https://client.example/cb"],
+          createdAt: now
+        },
+        { maxClients: cap, now }
+      )
+    ).toThrow(ClientCapReachedError);
+    expect(countClients(db)).toBe(3);
+    expect(getClientById(db, "client-refused")).toBeUndefined();
+    expect(listAuditEvents(db)).toHaveLength(3);
+
+    // Advance clock by 1 second so client-boundary is now older than 24h with last_used_at IS NULL.
+    const oneSecondLater = now + 1;
+    const inserted = insertClient(
+      db,
+      {
+        clientId: "client-accepted",
+        clientName: "Accepted Client",
+        redirectUris: ["https://client.example/cb"],
+        createdAt: oneSecondLater
+      },
+      { maxClients: cap, now: oneSecondLater }
+    );
+
+    expect(inserted.clientId).toBe("client-accepted");
+    expect(countClients(db)).toBe(3);
+    expect(getClientById(db, "client-boundary")).toBeUndefined();
+    expect(getClientById(db, "client-old-used")).toBeDefined();
+    expect(getClientById(db, "client-recent")).toBeDefined();
+    expect(getClientById(db, "client-accepted")).toBeDefined();
+    expect(listAuditEvents(db)).toHaveLength(4);
+    expect(listAuditEvents(db)[3]?.client_id).toBe("client-accepted");
+  });
+
+  it("fails ESLint on interpolated or concatenated SQL passed to prepare, exec, pragma, run, get or all (V1.2.4)", async () => {
     const eslint = new ESLint({
       overrideConfigFile: path.resolve("eslint.config.js")
     });
 
-    const templateInterpolation = await eslint.lintText(
-      [
-        "import type Database from 'better-sqlite3';",
-        "export function unsafe(db: Database.Database, id: string) {",
-        "  return db.prepare(`SELECT * FROM clients WHERE client_id = '${id}'`).get();",
-        "}"
-      ].join("\n"),
-      { filePath: path.resolve("src/store/clients.ts") }
-    );
-    expect(
-      templateInterpolation[0]?.messages.some(
-        (m) => m.ruleId === "no-restricted-syntax" && m.message.includes("ASVS V1.2.4")
-      )
-    ).toBe(true);
+    const unsafeCases: Array<{ label: string; code: string }> = [
+      {
+        label: "prepare template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafe(db: Database.Database, id: string) {",
+          "  return db.prepare(`SELECT * FROM clients WHERE client_id = '${id}'`).get();",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "prepare string concatenation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeConcat(db: Database.Database, id: string) {",
+          "  return db.prepare('SELECT * FROM clients WHERE client_id = ' + id).get();",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "exec template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeExec(db: Database.Database, table: string) {",
+          "  db.exec(`DROP TABLE ${table}`);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "pragma template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafePragma(db: Database.Database, version: string) {",
+          "  db.pragma(`user_version = ${version}`);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "pragma string concatenation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafePragmaConcat(db: Database.Database, mode: string) {",
+          "  db.pragma('journal_mode = ' + mode);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "run template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeRun(stmt: Database.Statement, id: string) {",
+          "  stmt.run(`DELETE FROM clients WHERE client_id = '${id}'`);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "run string concatenation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeRunConcat(stmt: Database.Statement, id: string) {",
+          "  stmt.run('DELETE FROM clients WHERE client_id = ' + id);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "get template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeGet(stmt: Database.Statement, id: string) {",
+          "  return stmt.get(`SELECT * FROM clients WHERE client_id = '${id}'`);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "get string concatenation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeGetConcat(stmt: Database.Statement, id: string) {",
+          "  return stmt.get('SELECT * FROM clients WHERE client_id = ' + id);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "all template interpolation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeAll(stmt: Database.Statement, id: string) {",
+          "  return stmt.all(`SELECT * FROM clients WHERE client_id = '${id}'`);",
+          "}"
+        ].join("\n")
+      },
+      {
+        label: "all string concatenation",
+        code: [
+          "import type Database from 'better-sqlite3';",
+          "export function unsafeAllConcat(stmt: Database.Statement, id: string) {",
+          "  return stmt.all('SELECT * FROM clients WHERE client_id = ' + id);",
+          "}"
+        ].join("\n")
+      }
+    ];
 
-    const stringConcat = await eslint.lintText(
-      [
-        "import type Database from 'better-sqlite3';",
-        "export function unsafeConcat(db: Database.Database, id: string) {",
-        "  return db.prepare('SELECT * FROM clients WHERE client_id = ' + id).get();",
-        "}"
-      ].join("\n"),
-      { filePath: path.resolve("src/store/clients.ts") }
-    );
-    expect(
-      stringConcat[0]?.messages.some(
-        (m) => m.ruleId === "no-restricted-syntax" && m.message.includes("ASVS V1.2.4")
-      )
-    ).toBe(true);
-
-    const execInterpolation = await eslint.lintText(
-      [
-        "import type Database from 'better-sqlite3';",
-        "export function unsafeExec(db: Database.Database, table: string) {",
-        "  db.exec(`DROP TABLE ${table}`);",
-        "}"
-      ].join("\n"),
-      { filePath: path.resolve("src/store/clients.ts") }
-    );
-    expect(
-      execInterpolation[0]?.messages.some(
-        (m) => m.ruleId === "no-restricted-syntax" && m.message.includes("ASVS V1.2.4")
-      )
-    ).toBe(true);
+    for (const testCase of unsafeCases) {
+      const results = await eslint.lintText(testCase.code, {
+        filePath: path.resolve("src/store/clients.ts")
+      });
+      expect(
+        results[0]?.messages.some(
+          (m) => m.ruleId === "no-restricted-syntax" && m.message.includes("ASVS V1.2.4")
+        ),
+        testCase.label
+      ).toBe(true);
+    }
 
     const parameterised = await eslint.lintText(
       [
         "import type Database from 'better-sqlite3';",
         "export function safe(db: Database.Database, id: string) {",
+        "  db.pragma('foreign_keys = ON');",
         "  return db.prepare('SELECT * FROM clients WHERE client_id = ?').get(id);",
         "}"
       ].join("\n"),
